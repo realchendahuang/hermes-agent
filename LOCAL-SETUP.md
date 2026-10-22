@@ -56,35 +56,59 @@ hermes -z "测试一下"     # 下次调用会自动拉起新的
 
 ```yaml
 model:
-  provider: minimax-cn            # MiniMax 国内域（api.minimaxi.com）
-  default: MiniMax-M3.1-Flash     # context 1M
+  provider: commandcode
+  default: deepseek/deepseek-v4.1-flash    # 注意：这个 API 必须带 vendor 前缀
 fallback_model:
-  provider: deepseek
-  model: deepseek-flash           # 即 DeepSeek-V4.1-Flash
+  provider: opencode-go-oc                 # 自定义 provider（见下）
+  model: deepseek-v4.1-flash
+
+providers:
+  opencode-go-oc:
+    base_url: https://opencode.ai/zen/go/v1
+    api_mode: chat_completions
+    key_env: OPENCODE_GO_API_KEY
+    session_affinity_header: x-opencode-session   # 必需，否则 400 MissingSessionID
 ```
+
+主模型 = **CommandCode 的 DeepSeek V4.1 Flash**；额度耗尽/限流/不可达时自动切 **OpenCode Go 的 DeepSeek V4.1 Flash**。
 
 ### 密钥（`~/.hermes/.env`）
 
 ```dotenv
-MINIMAX_CN_API_KEY=sk-cp-...
-DEEPSEEK_API_KEY=sk-...
+COMMANDCODE_API_KEY=user_...
+OPENCODE_GO_API_KEY=oc_sk_...
+MINIMAX_CN_API_KEY=sk-cp-...      # 备用，未启用
+DEEPSEEK_API_KEY=sk-...           # 备用，未启用
 ```
 
-两个 key 都迁自 **ZCode 的 provider 配置**（`~/.zcode/v2/provider_config.json`），原样可用。
+全部迁自 **ZCode 的 provider 配置**（`~/.zcode/v2/provider_config.json`），原样可用。
 
 ### 已验证
 
 | 链路 | 状态 | 验证方式 |
 |---|---|---|
-| MiniMax-M3.1-Flash（默认） | ✅ 对话 + **工具调用** | 让它执行 `echo` + `pwd`，正确返回 |
-| DeepSeek-V4.1-Flash（fallback） | ✅ 对话 | `hermes --provider deepseek -m deepseek-flash -z "..."` |
+| CommandCode / `deepseek/deepseek-v4.1-flash`（默认） | ✅ 对话 | 默认配置下 `hermes -z`，模型自报 provider=commandcode |
+| OpenCode Go / `deepseek-v4.1-flash`（fallback） | ✅ 对话 | `hermes --provider opencode-go-oc -m deepseek-v4.1-flash -z "..."` |
+
+### 自动切换的触发条件
+
+Hermes 的 billng 分类（`agent/error_classifier.py`）覆盖 **HTTP 402** 以及这些消息关键词：
+`insufficient credits / insufficient_quota / payment required / credits exhausted /
+top up your credits / balance_depleted / member_spend_cap_exceeded …`
+另有 429（限流）、503/529（过载）、连接失败。命中即切 fallback，并在对话里给出提示。
 
 ### 坑
 
-- **MiniMax 的 key 只对国内域生效**。`api.minimax.io`（global）用这个 key 返回 401，必须走 `minimax-cn`。
-- `minimax-cn` 的协议是 **Anthropic Messages**（`api.minimaxi.com/anthropic`），不是 OpenAI 兼容层 —— 所以依赖 `anthropic` SDK（见 §6）。
-- MiniMax M3.1 Flash 是 reasoning 模型，`max_tokens` 给小了会被 thinking 吃光、内容为空。日常用不需管（Hermes 不设上限）。
-- 静态模型目录 `hermes_cli/models_catalog_static.py` 的 `_MINIMAX_MODELS` 还没有 `MiniMax-M3.1-Flash`（只有 M3/M2.7/…）。不影响使用（`hermes model` 会拉 live `/v1/models`），但想让它出现在静态菜单里就在那里加一行。
+- **CommandCode 的模型名必须带 vendor 前缀**：`deepseek/deepseek-v4.1-flash`。
+  裸写 `deepseek-v4.1-flash` 会 `HTTP 400 unsupported_model`。`hermes doctor` 会因此警告
+  "vendor-prefixed slug but provider is not an aggregator" —— **是警告，不是错误，可以忽略**。
+- **OpenCode Go 不是裸 HTTP API**：不带 `x-opencode-session` 头会返回
+  `400 MissingSessionID`（它按会话路由）。解决办法就是上面的 `session_affinity_header`，
+  Hermes 会把这个头自动带上会话 id。
+- **MiniMax 的 key 只对国内域生效**（`api.minimax.io` 返回 401），若要用必须走 `minimax-cn`；
+  且它走 Anthropic Messages 协议，依赖 `anthropic` SDK。
+- CommandCode 是 **96 个模型**的聚合入口（claude-sonnet-5 / gpt-5.6 / glm-5.3 / kimi-k3 等都在里面），
+  换个模型只要 `hermes config set model.default deepseek/deepseek-v4.1-flash-fast` 这种形式。
 
 ### 换模型
 
@@ -94,7 +118,8 @@ hermes config set model.default <model-id>    # 直接改
 hermes --provider <p> -m <model> -z "..."     # 单次覆盖
 ```
 
-以后要接 OpenCode Go / CommandCode 的 key，同样加进 `~/.hermes/.env` 对应变量即可。
+> 注意：`--provider` 的单次覆盖对 gateway（Telegram）一侧不生效 —— Telegram 用户看到的始终是
+> config.yaml 里的默认模型。想给 Telegram 换模型，改 config 后 `hermes gateway restart`。
 
 ---
 

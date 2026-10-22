@@ -17,6 +17,7 @@
 | PM 工具链 | `~/.hermes/tools/` | Python 3.14 / Node 26 / ripgrep / ffmpeg / Chromium / cua-driver |
 | 用户数据 | `~/.hermes/` | config、session、memory、skills、logs、gateway.sock |
 | 密钥 | `~/.hermes/.env` | 权限 600，**不要提交到任何仓库** |
+| 网关服务 | `~/Library/LaunchAgents/ai.hermes.gateway.plist` | launchd 托管，**登录自启 + 崩溃重启** |
 
 **磁盘占用**（2026-10-22）：源码 1.6G + installs 962M + tools 950M ≈ **3.5G**。
 
@@ -159,19 +160,74 @@ git push origin main
 | 3 | 上面那个错误重复出现、重启也没用 | **gateway 是 7:21 启动的常驻进程**，一直用旧环境；后续 `hermes -z` 只是给它发消息 | `hermes gateway stop` 后重试。**换环境/改配置后务必重启 gateway** |
 | 4 | `pm/extras.py:233` 报 "this process does not run from the install's dependency environment" | 进程启动时 `sys.path` 里没有 PM generation 的 site-packages；且手工 venv 干扰了判定 | 删掉手工 venv，用官方 `hermes_cli/_launchers.py` 发布启动器（`~/.local/bin/hermes`） |
 | 5 | `hermes --tui` 不可用 | `ui-tui` 未构建 | 需要时再 `npm install` + 构建 |
+| 6 | `hermes gateway install` 报 `launchctl bootstrap exit 5` | 新 API `launchctl bootstrap gui/501` 在本机报 EIO | 用旧 API 兜底：`launchctl load -w ~/Library/LaunchAgents/ai.hermes.gateway.plist`，之后 `launchctl list \| grep hermes` 能看到，`hermes gateway status` 也会认作 supervised |
 
 ---
 
-## 8. 资源占用
+## 8. Telegram 网关（常驻）
+
+### 当前状态
+
+| 项 | 值 |
+|---|---|
+| Bot 名称 | **MacBookair** |
+| Username | `@MacBookair_Kim_bot`（`t.me/MacBookair_Kim_bot`） |
+| Token | 在 `~/.hermes/.env` 的 `TELEGRAM_BOT_TOKEN`（**勿外传**） |
+| 托管方式 | launchd LaunchAgent，`RunAtLoad` + `KeepAlive`，登录自启 & 崩溃重启 |
+| 连接模式 | long polling（自动探测到你的 `127.0.0.1:7890` 代理并复用） |
+| 已注册命令 | 60 条 bot 菜单命令 |
+
+### 生效的配置
+
+```yaml
+# ~/.hermes/config.yaml
+platforms:
+  telegram:
+    enabled: true
+```
+
+```dotenv
+# ~/.hermes/.env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USERS=<你的 Telegram 数字 user id>   # 不填则走 DM 配对
+```
+
+### 安全模型（重要）
+
+Hermes **默认拒绝未知发送者**，两条路：
+
+1. **白名单**（推荐）：`TELEGRAM_ALLOWED_USERS=123456789`（逗号分隔多个），立即放行
+2. **DM 配对**：留空时，陌生人给 bot 发消息会收到一次性配对码，owner 执行
+   `hermes pairing approve telegram <code>` 才放行
+
+查看状态：`hermes pairing list`
+
+### 管理命令
+
+```bash
+hermes gateway status                     # 是否被 launchd 托管、PID
+hermes gateway start / stop / restart     # 控制服务
+hermes gateway install / uninstall        # 装/卸 launchd 服务
+hermes pairing list                       # 待批准 + 已批准用户
+hermes pairing approve telegram <code>    # 批准配对
+tail -f ~/.hermes/logs/gateway.log        # 实时日志
+```
+
+> ⚠️ 服务一旦由 launchd 托管，**不要**再用 `hermes gateway run` 前台起第二个实例 ——
+> 两个进程轮询同一个 bot token 会互相抢 update，Telegram 会报 409 冲突。
+
+---
+
+## 9. 资源占用
 
 | 项 | 实测（2026-10-22） |
 |---|---|
-| gateway 常驻 | RSS ≈ 314 MB，CPU ≈ 0.1% |
+| gateway 常驻（含 Telegram） | 主进程 ≈ 234 MB + 辅助进程 ≈ 14 MB，CPU ≈ 1.8% |
 | 磁盘 | ≈ 3.5 G |
 | 首次启动 | 需要 PM sync（约 1 分钟，之后是秒级） |
 
-本机是 16G 内存的 MacBook Air，日常够用；`gateway` 空闲 600s 会自动退出，不会长期占内存。
-如果要跑 cron / Telegram 网关这类**长驻**负载，按 `~/code/AGENTS.md` 的规矩应该搬到 mini。
+本机是 16G 内存的 MacBook Air。网关常驻约 250 MB，可接受；但**不要再叠**第二个常驻网关或桌面端。
+如果要加 cron / 多平台（Discord、Slack）这类负载，按 `~/code/AGENTS.md` 的规矩应该搬到 mini。
 
 ---
 
